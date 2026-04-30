@@ -568,6 +568,66 @@ def _get_hyperliquid_candle_close(symbol: str, executed_at: str) -> Optional[flo
     return float(f"{closest:.6f}")
 
 
+def get_crypto_price_history(symbol: str, interval: str = "15m", limit: int = 100) -> list[dict[str, Any]]:
+    """
+    Fetch candle history from Hyperliquid.
+    Intervals: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 1w
+    """
+    coin = _normalize_hyperliquid_symbol(symbol)
+    end_ms = int(time.time() * 1000)
+
+    interval_ms_map = {
+        "1m": 60 * 1000,
+        "5m": 5 * 60 * 1000,
+        "15m": 15 * 60 * 1000,
+        "30m": 30 * 60 * 1000,
+        "1h": 60 * 60 * 1000,
+        "2h": 2 * 60 * 60 * 1000,
+        "4h": 4 * 60 * 60 * 1000,
+        "8h": 8 * 60 * 60 * 1000,
+        "12h": 12 * 60 * 60 * 1000,
+        "1d": 24 * 60 * 60 * 1000,
+        "1w": 7 * 24 * 60 * 60 * 1000,
+    }
+
+    duration_ms = interval_ms_map.get(interval, 15 * 60 * 1000) * (limit + 5)
+    start_ms = end_ms - duration_ms
+
+    payload = {
+        "type": "candleSnapshot",
+        "req": {
+            "coin": coin,
+            "interval": interval,
+            "startTime": start_ms,
+            "endTime": end_ms,
+        },
+    }
+
+    try:
+        data = _hyperliquid_post(payload)
+        if not isinstance(data, list):
+            return []
+
+        history = []
+        for c in data:
+            if not isinstance(c, dict):
+                continue
+            history.append({
+                "time": c.get("t"),
+                "open": float(c.get("o", 0)),
+                "high": float(c.get("h", 0)),
+                "low": float(c.get("l", 0)),
+                "close": float(c.get("c", 0)),
+                "volume": float(c.get("v", 0)),
+            })
+
+        history.sort(key=lambda x: x["time"], reverse=True)
+        return history[:limit]
+    except Exception as e:
+        print(f"[Price API] Error fetching history for {symbol}: {e}")
+        return []
+
+
 def get_price_from_market(
     symbol: str,
     executed_at: str,

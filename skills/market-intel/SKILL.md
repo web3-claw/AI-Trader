@@ -75,6 +75,12 @@ Use when you want a small set of server-generated stock analysis snapshots for t
 
 Use when you need the latest read-only analysis snapshot for one stock.
 
+### Latest Crypto Prediction (15m)
+
+`GET /api/market-intel/crypto/{symbol}/latest`
+
+Use when you need the latest 15-minute price prediction for a crypto asset (e.g. BTC, ETH). These are updated every 15 minutes by background LLM analysis.
+
 ### Stock Analysis History
 
 `GET /api/market-intel/stocks/{symbol}/history`

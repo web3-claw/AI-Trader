@@ -676,6 +676,91 @@ def _build_etf_flow_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     return etf_rows, summary
 
 
+def _build_crypto_analysis(symbol: str) -> dict[str, Any]:
+    from price_fetcher import get_crypto_price_history
+
+    # 1. Get history (15m candles for the last 24h)
+    history = get_crypto_price_history(symbol, interval="15m", limit=96)
+    if not history:
+        raise RuntimeError(f"No history for {symbol}")
+
+    current_price = history[0]["close"]
+    prices = [h["close"] for h in history]
+    ma5 = sum(prices[:5]) / 5 if len(prices) >= 5 else current_price
+    ma20 = sum(prices[:20]) / 20 if len(prices) >= 20 else current_price
+
+    # 2. Get recent news for crypto
+    news_snapshot = _load_latest_news_snapshot("crypto")
+    news_context = "No recent crypto news available."
+    if news_snapshot and news_snapshot.get("items"):
+        news_items = news_snapshot["items"][:5]
+        news_context = "\n".join([f"- {item['title']}: {item['summary'][:200]}" for item in news_items])
+
+    # 3. Generate prediction using LLM
+    signal = "hold"
+    score = 0.0
+    trend_status = "neutral"
+    summary = f"Analyzing {symbol} at ${current_price:.2f}."
+    bullish_factors = []
+    risk_factors = []
+
+    if OPENROUTER_API_KEY and OPENROUTER_MODEL and OpenRouter:
+        prompt = (
+            f"You are an expert crypto trader. Analyze {symbol} for a 15-minute outlook.\n\n"
+            f"Current Price: ${current_price:.2f}\n"
+            f"15m MA5: ${ma5:.2f}\n"
+            f"15m MA20: ${ma20:.2f}\n\n"
+            f"Recent News Context:\n{news_context}\n\n"
+            "Return a JSON object with:\n"
+            "- signal: 'buy', 'sell', or 'hold'\n"
+            "- signal_score: -5 (extreme bearish) to 5 (extreme bullish)\n"
+            "- trend_status: short description of trend\n"
+            "- summary: one concise paragraph explaining the 15m prediction\n"
+            "- bullish_factors: list of strings\n"
+            "- risk_factors: list of strings\n"
+            "DO NOT include any other text."
+        )
+
+        try:
+            with OpenRouter(api_key=OPENROUTER_API_KEY) as client:
+                response = client.chat.send(
+                    model=OPENROUTER_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            content = _extract_openrouter_text(response)
+            # Find JSON block
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                signal = data.get("signal", signal)
+                score = float(data.get("signal_score", score))
+                trend_status = data.get("trend_status", trend_status)
+                summary = data.get("summary", summary)
+                bullish_factors = data.get("bullish_factors", [])
+                risk_factors = data.get("risk_factors", [])
+        except Exception as e:
+            print(f"[Market Intel] LLM Prediction error for {symbol}: {e}")
+
+    return {
+        "symbol": symbol,
+        "market": "crypto",
+        "current_price": round(current_price, 2),
+        "moving_averages": {
+            "ma5": round(ma5, 2),
+            "ma20": round(ma20, 2),
+        },
+        "signal": signal,
+        "signal_score": round(score, 2),
+        "trend_status": trend_status,
+        "bullish_factors": bullish_factors,
+        "risk_factors": risk_factors,
+        "summary": summary,
+        "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "support_levels": [round(min(prices[:20]), 2)] if len(prices) >= 20 else [],
+        "resistance_levels": [round(max(prices[:20]), 2)] if len(prices) >= 20 else [],
+    }
+
+
 def _build_stock_analysis(symbol: str) -> dict[str, Any]:
     series = _fetch_daily_adjusted_series(symbol)
     if len(series) < 20:
@@ -1268,6 +1353,68 @@ def get_etf_flows_payload() -> dict[str, Any]:
         conn.close()
 
 
+def refresh_crypto_analysis_snapshots() -> dict[str, Any]:
+    created_at = _utc_now_iso_z()
+    inserted = 0
+    errors: dict[str, str] = {}
+    symbols = ["BTC", "ETH"]
+    rows_to_insert: list[tuple[Any, ...]] = []
+
+    for symbol in symbols:
+        try:
+            analysis = _build_crypto_analysis(symbol)
+            analysis_id = f"{symbol}:{created_at}"
+            rows_to_insert.append((
+                symbol,
+                "crypto",
+                analysis_id,
+                analysis["current_price"],
+                "USD",
+                analysis["signal"],
+                analysis["signal_score"],
+                analysis["trend_status"],
+                json.dumps(analysis.get("support_levels", []), ensure_ascii=True),
+                json.dumps(analysis.get("resistance_levels", []), ensure_ascii=True),
+                json.dumps(analysis.get("bullish_factors", []), ensure_ascii=True),
+                json.dumps(analysis.get("risk_factors", []), ensure_ascii=True),
+                analysis["summary"],
+                json.dumps(analysis, ensure_ascii=True),
+                json.dumps([], ensure_ascii=True),
+                created_at,
+            ))
+            inserted += 1
+        except Exception as exc:
+            errors[symbol] = str(exc)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if rows_to_insert:
+            cursor.executemany(
+                """
+                INSERT INTO stock_analysis_snapshots (
+                    symbol, market, analysis_id, current_price, currency, signal,
+                    signal_score, trend_status, support_levels_json, resistance_levels_json,
+                    bullish_factors_json, risk_factors_json, summary_text, analysis_json, news_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows_to_insert,
+            )
+        _prune_stock_analysis_history(cursor)
+        conn.commit()
+    finally:
+        conn.close()
+
+    delete_pattern(_cache_key("crypto", "*"))
+    delete_pattern(_cache_key("overview"))
+
+    return {
+        "inserted_symbols": inserted,
+        "errors": errors,
+        "created_at": created_at,
+    }
+
+
 def refresh_stock_analysis_snapshots() -> dict[str, Any]:
     created_at = _utc_now_iso_z()
     inserted = 0
@@ -1328,6 +1475,57 @@ def refresh_stock_analysis_snapshots() -> dict[str, Any]:
         "errors": errors,
         "created_at": created_at,
     }
+
+
+def get_crypto_analysis_latest_payload(symbol: str) -> dict[str, Any]:
+    symbol = symbol.strip().upper()
+    cache_key = _cache_key("crypto", "latest", symbol)
+    cached = get_json(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT symbol, market, analysis_id, current_price, currency, signal, signal_score,
+                   trend_status, support_levels_json, resistance_levels_json, bullish_factors_json,
+                   risk_factors_json, summary_text, analysis_json, created_at
+            FROM stock_analysis_snapshots
+            WHERE symbol = ? AND market = 'crypto'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (symbol,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            payload = {"available": False, "symbol": symbol}
+            set_json(cache_key, payload, ttl_seconds=900)  # 15 mins for crypto
+            return payload
+        payload = {
+            "available": True,
+            "symbol": row["symbol"],
+            "market": row["market"],
+            "analysis_id": row["analysis_id"],
+            "current_price": row["current_price"],
+            "currency": row["currency"],
+            "signal": row["signal"],
+            "signal_score": row["signal_score"],
+            "trend_status": row["trend_status"],
+            "support_levels": json.loads(row["support_levels_json"] or "[]"),
+            "resistance_levels": json.loads(row["resistance_levels_json"] or "[]"),
+            "bullish_factors": json.loads(row["bullish_factors_json"] or "[]"),
+            "risk_factors": json.loads(row["risk_factors_json"] or "[]"),
+            "summary": row["summary_text"],
+            "analysis": json.loads(row["analysis_json"] or "{}"),
+            "created_at": row["created_at"],
+        }
+        set_json(cache_key, payload, ttl_seconds=900)
+        return payload
+    finally:
+        conn.close()
 
 
 def get_stock_analysis_latest_payload(symbol: str) -> dict[str, Any]:
