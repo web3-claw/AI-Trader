@@ -3,6 +3,7 @@ from typing import Optional
 from fastapi import FastAPI
 
 from market_intel import (
+    get_crypto_analysis_latest_payload,
     get_etf_flows_payload,
     get_featured_stock_analysis_payload,
     get_macro_signals_payload,
@@ -47,3 +48,7 @@ def register_market_routes(app: FastAPI) -> None:
     @app.get('/api/market-intel/stocks/{symbol}/history')
     async def market_intel_stock_history(symbol: str, limit: int = 10):
         return get_stock_analysis_history_payload(symbol, limit=limit)
+
+    @app.get('/api/market-intel/crypto/{symbol}/latest')
+    async def market_intel_crypto_latest(symbol: str):
+        return get_crypto_analysis_latest_payload(symbol)

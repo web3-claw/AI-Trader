@@ -483,6 +483,29 @@ async def refresh_etf_flow_snapshots_loop():
         await asyncio.sleep(refresh_interval)
 
 
+async def refresh_crypto_analysis_snapshots_loop():
+    """Background task to refresh crypto-analysis snapshots every 15 minutes."""
+    from market_intel import refresh_crypto_analysis_snapshots
+
+    refresh_interval = _env_int("CRYPTO_ANALYSIS_REFRESH_INTERVAL", 900, minimum=300)
+
+    await asyncio.sleep(15)
+
+    while True:
+        try:
+            result = await asyncio.to_thread(refresh_crypto_analysis_snapshots)
+            print(
+                "[Market Intel] Refreshed crypto analysis snapshots: "
+                f"inserted={result.get('inserted_symbols', 0)} "
+                f"errors={len(result.get('errors', {}))}"
+            )
+        except Exception as e:
+            print(f"[Crypto Analysis Error] {e}")
+
+        print(f"[Market Intel] Next crypto analysis refresh in {refresh_interval} seconds")
+        await asyncio.sleep(refresh_interval)
+
+
 async def refresh_stock_analysis_snapshots_loop():
     """Background task to refresh featured stock-analysis snapshots."""
     from market_intel import refresh_stock_analysis_snapshots
@@ -720,6 +743,7 @@ BACKGROUND_TASK_REGISTRY = {
     "market_news": refresh_market_news_snapshots_loop,
     "macro_signals": refresh_macro_signal_snapshots_loop,
     "etf_flows": refresh_etf_flow_snapshots_loop,
+    "crypto_analysis": refresh_crypto_analysis_snapshots_loop,
     "stock_analysis": refresh_stock_analysis_snapshots_loop,
 }
 
